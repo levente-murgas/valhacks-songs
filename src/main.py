@@ -1,7 +1,6 @@
 import numpy as np
-import json, random
+import json
 import pandas as pd
-from typing import Iterable, Tuple, Any, Optional
 from typing import List, Set, Dict, Final
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
@@ -209,12 +208,20 @@ class Recommender:
 
 if __name__ == "__main__":
     r = Recommender()
-    print("Columns used:", r.numeric_features)
     print(
         r.get_recommendations(
-            ["5SuOikwiRyPMVoIQDJUgSV", "0wihfILRNOwE2156Shezc8",
-             "63bmIgH9sS6sX5Sc7MetGq", "3wpZTp7HM8Dv25oExNgCC6", "3QAE1arPJAMVKt3NUqjikE"],
-            10,
-            {"Gen Hoshino", "Mariah Angeliq"}
+            [
+                "7o2CTH4ctstm8TNelqjb51",
+                "2zYzyRzz6pRmhPzyfMEC8s",
+                "08mG3Y1vljYA6bvDt4Wqkj",
+                "0bVtevEgtDIeRjCJbK3Lmv",
+                "3YBZIN3rekqsKxbJc9FZko",
+                "57bgtoPSgt236HzfBOd8kj",
+                "7LRMbd3LEoV5wZJvXT1Lwb",
+                "2SiXAy7TuUkycRVbbWDEpo",
+                "0C80GCp0mMuBzLf3EAXqxv"
+            ],
+            2,
+            {"AC/DC", "Europe", "Guns N' Roses"}
         )
     )
