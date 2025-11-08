@@ -3,7 +3,7 @@ import argparse, json, random, os, re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Set
 
-from recommender import Recommender
+from main import Recommender
 
 RNG_SEED = 42
 
