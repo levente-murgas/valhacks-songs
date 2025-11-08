@@ -1,0 +1,63 @@
+{
+  "playlist": [
+    {
+      "name": "rock",
+      "recommendation": 5,
+      "total_tracks": [
+        "7o2CTH4ctstm8TNelqjb51",
+        "2zYzyRzz6pRmhPzyfMEC8s",
+        "08mG3Y1vljYA6bvDt4Wqkj",
+        "0bVtevEgtDIeRjCJbK3Lmv",
+        "3YBZIN3rekqsKxbJc9FZko",
+        "57bgtoPSgt236HzfBOd8kj",
+        "7LRMbd3LEoV5wZJvXT1Lwb",
+        "2SiXAy7TuUkycRVbbWDEpo",
+        "0C80GCp0mMuBzLf3EAXqxv",
+        "69QHm3pustz01CJRwdo20z",
+        "3MrRksHupTVEQ7YbA0FsZK"
+      ],
+      "hidden_tracks": [
+        "3YBZIN3rekqsKxbJc9FZko",
+        "57bgtoPSgt236HzfBOd8kj",
+        "7o2CTH4ctstm8TNelqjb51",
+        "08mG3Y1vljYA6bvDt4Wqkj",
+        "3MrRksHupTVEQ7YbA0FsZK"
+      ],
+      "hidden_artists": [
+        "AC/DC",
+        "Europe",
+        "Guns N' Roses"
+      ]
+    },
+    {
+      "name": "TBS",
+      "recommendation": 5,
+      "total_tracks": [
+        "5ip3FCi89E2eDtId6kcJmo",
+        "6UiDiFJUGEDzkGpZBL8IYq",
+        "4d42YQbGZxwYq7YZiCkTDb",
+        "4ZAerT2NicBmzZ4VkpmWEn",
+        "4rIAqwhHGfWChQvQGYwEfR",
+        "4pWawf1Rq4qHDv4Ktqjg2D",
+        "5XlvOh5YbJMp7CU3NoksNf"
+      ],
+      "hidden_tracks": [
+        "4rIAqwhHGfWChQvQGYwEfR",
+        "6UiDiFJUGEDzkGpZBL8IYq",
+        "5ip3FCi89E2eDtId6kcJmo",
+        "5XlvOh5YbJMp7CU3NoksNf",
+        "4pWawf1Rq4qHDv4Ktqjg2D"
+      ],
+      "hidden_artists": [
+        "Emilie Brandt",
+        "ILLENIUM",
+        "Khalid",
+        "MAX",
+        "Marshmello",
+        "R5",
+        "Ross Lynch",
+        "Tritonal"
+      ]
+    }
+  ]
+}
