@@ -8,7 +8,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 def load_data():
     # Load the dataset
-    df = pd.read_csv("dataset.csv", index_col=0)
+    df = pd.read_csv("data/dataset.csv", index_col=0)
     df.drop_duplicates(subset=['explicit', 'danceability', 'energy', 'key', 'loudness', 'mode',
         'speechiness', 'acousticness', 'instrumentalness', 'liveness', 'valence', 'tempo', 'duration_ms', 'popularity',
         'artists', 'track_name', 'time_signature'], inplace=True) # There are duplicates that have different track_id, genre and album. There are duplicates in other dimensions (eg. popularity and duration) but these are taken
@@ -54,7 +54,7 @@ def load_data():
     X_scaled = scaler.fit_transform(X)
 
 
-    with open('testset.json', 'r') as f:
+    with open('evaluation/testset.json', 'r') as f:
         testset = json.load(f)
 
     return df_clean, X_scaled, testset
