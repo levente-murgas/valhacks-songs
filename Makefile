@@ -53,4 +53,8 @@ weight_based: ## Run weight based
 	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_weight_based.py
 
 
+evaluate:
+	@${VENV_PYTHON} ${SOURCE_PATH}/evaluation.py
+
+
 .PHONY: venv requirements pip run
