@@ -1,10 +1,12 @@
-import json
 import numpy as np
+import json, random
 import pandas as pd
-
+from typing import Iterable, Tuple, Any, Optional
+from typing import List, Set, Dict, Final
 from pathlib import Path
-from typing import List, Set, Dict
 from sklearn.preprocessing import StandardScaler
+
+ARTIST_BOOST: Final[float] = 1.50
 
 def _safe_path(base: Path, maybe_abs: str) -> Path:
     p = Path(maybe_abs)
@@ -161,7 +163,7 @@ class Recommender:
         if target_artist:
             idx = self._artist_boost_indices(self.artist_to_idx, target_artist)
             if idx.size > 0:
-                scores[idx] *= 1.10
+                scores[idx] *= ARTIST_BOOST
 
         # ---- exclude *all rows* whose track_id is one of the seeds ----
         seed_mask = self.df["track_id"].isin(input_track_ids).to_numpy()
@@ -171,6 +173,7 @@ class Recommender:
         N = scores.size
         k = min(max(n_recommendations * 3, n_recommendations), N)
         part_idx = np.argpartition(-scores, k - 1)[:k]
+
         # Stable final order within the slice for determinism
         local_sorted = part_idx[np.argsort(-scores[part_idx], kind="mergesort")]
 

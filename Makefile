@@ -49,4 +49,8 @@ pip: ## Run pip commands
 run: ## Run main.py
 	@${VENV_PYTHON} ${SOURCE_PATH}/main.py
 
+evaluator: ## Run evaluator.py
+	@${VENV_PYTHON} ${SOURCE_PATH}/evaluator.py
+
+
 .PHONY: venv requirements pip run
