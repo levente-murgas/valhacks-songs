@@ -49,5 +49,7 @@ pip: ## Run pip commands
 weight_based: ## Run main.py
 	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_weight_based.py
 
+trained: ## Run main.py
+	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_trained.py
 
 .PHONY: venv requirements pip run
