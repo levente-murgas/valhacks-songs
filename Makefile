@@ -49,7 +49,4 @@ pip: ## Run pip commands
 run: ## Run main.py
 	@${VENV_PYTHON} ${SOURCE_PATH}/main.py
 
-run2: ## Run main.py
-	@${VENV_PYTHON} ${SOURCE_PATH}/main_2.py
-
 .PHONY: venv requirements pip run
