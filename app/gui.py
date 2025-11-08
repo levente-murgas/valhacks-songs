@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -15,6 +16,10 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_PATH = PROJECT_ROOT / "src"
 DATA_PATH = PROJECT_ROOT / "data"
+PROCESSED_DIR = DATA_PATH / "processed"
+NORMALIZED_DATASET_PATH = PROCESSED_DIR / "dataset_normalized.csv"
+MODELS_DIR = PROJECT_ROOT / "models"
+INDEX_PATH = MODELS_DIR / "candidate_index.joblib"
 
 if str(SRC_PATH) not in sys.path:
     sys.path.append(str(SRC_PATH))
@@ -37,6 +42,48 @@ from spotify_export import (  # type: ignore[import]
 logger = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO)
+
+
+_BOOTSTRAP_LOCK = threading.Lock()
+_BOOTSTRAP_COMPLETED = False
+
+
+def ensure_pipeline_artifacts() -> None:
+    global _BOOTSTRAP_COMPLETED
+    if _BOOTSTRAP_COMPLETED:
+        return
+
+    with _BOOTSTRAP_LOCK:
+        if _BOOTSTRAP_COMPLETED:
+            return
+
+        try:
+            if not NORMALIZED_DATASET_PATH.exists():
+                logger.info("Normalized dataset missing; running data_ingestion pipeline.")
+                from data_ingestion import main as run_data_ingestion  # type: ignore[import]
+
+                run_data_ingestion()
+                if not NORMALIZED_DATASET_PATH.exists():
+                    raise FileNotFoundError(
+                        f"Expected normalized dataset at {NORMALIZED_DATASET_PATH}, but it was not created."
+                    )
+
+            if not INDEX_PATH.exists():
+                logger.info("Candidate index missing; building nearest-neighbour index.")
+                from candidate_generation import (  # type: ignore[import]
+                    build_candidate_index,
+                    persist_candidate_index,
+                )
+
+                index = build_candidate_index()
+                persist_candidate_index(index)
+        except Exception as exc:  # pragma: no cover - bootstrap safety net
+            logger.exception("Failed to bootstrap pipeline artifacts.")
+            raise RuntimeError(
+                "Unable to prepare the normalized dataset or candidate index required for the recommender."
+            ) from exc
+
+        _BOOTSTRAP_COMPLETED = True
 
 
 FEATURE_COLUMNS: Sequence[str] = (
@@ -95,11 +142,13 @@ def playlist_view_from_dict(data: Mapping[str, Any]) -> PlaylistView:
 
 @st.cache_resource(show_spinner=False)
 def get_recommender() -> Recommender:
+    ensure_pipeline_artifacts()
     return Recommender()
 
 
 @st.cache_data(show_spinner=False)
 def get_catalog() -> pd.DataFrame:
+    ensure_pipeline_artifacts()
     return load_catalog()
 
 

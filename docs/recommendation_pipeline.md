@@ -215,6 +215,7 @@ For a quick, no-React interface to explore playlists and their characteristics, 
   - Load bundled sample playlists from the `data/` directory.
   - Inspect summary metrics, artist diversity charts, audio-feature averages, and the scoring breakdown produced by the heuristic ranker.
   - Push the active playlist to Spotify with the **Add to Spotify** button (includes optional advanced auth controls and reuses the existing export helper).
+  - On first launch the app automatically runs the preprocessing pipeline (normalised dataset + candidate index) when those assets are missing, so deployment environments don’t require manual bootstrap scripts.
 
 The Streamlit application reuses the existing recommender pipeline (`playlist_builder` + `Recommender`) without modifying any ranking logic, so UI experimentation stays decoupled from scoring updates.
 
