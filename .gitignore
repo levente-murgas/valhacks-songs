@@ -1,1 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.Python
+
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# IDEs / tooling
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data artifacts
+data/processed/
+models/
+reports/figures/
+reports/data_summary.json
+data/*.json
+data/*.txt
+
+# Logs / cache
+*.log
+*.cache/
+
+# Other generated files
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
 .idea
