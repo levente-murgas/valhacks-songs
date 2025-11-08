@@ -192,6 +192,12 @@ def _split_artists(artists_str: str) -> set[str]:
     return {artist.strip() for artist in artists_str.split(";") if artist.strip()}
 
 
+def _track_signature(row: pd.Series) -> tuple[str, str]:
+    name = str(row.get("track_name") or "").strip().lower()
+    artists = str(row.get("artists") or "").strip().lower()
+    return name, artists
+
+
 def _is_major_mode(value: object) -> bool:
     if value is None:
         return False
@@ -231,6 +237,11 @@ def rank_candidates(
 
     ranked: list[CandidateFeatures] = []
     artist_counts: dict[str, int] = {}
+    seen_signatures: set[tuple[str, str]] = set()
+
+    for track_id in seed.present_track_ids:
+        if track_id in deduped.index:
+            seen_signatures.add(_track_signature(deduped.loc[track_id]))
 
     for feature in features:
         if feature.track_id not in deduped.index:
@@ -238,6 +249,10 @@ def rank_candidates(
         row = deduped.loc[feature.track_id]
         artists = _split_artists(row["artists"])
         is_target_artist = bool(target_artist.intersection(artists))
+        signature = _track_signature(row)
+
+        if signature in seen_signatures:
+            continue
 
         if not is_target_artist:
             exceeded = any(artist_counts.get(artist, 0) >= 1 for artist in artists)
@@ -247,6 +262,7 @@ def rank_candidates(
         ranked.append(feature)
         for artist in artists:
             artist_counts[artist] = artist_counts.get(artist, 0) + 1
+        seen_signatures.add(signature)
 
         if len(ranked) >= n_recommendations:
             break
@@ -259,7 +275,13 @@ def rank_candidates(
         for feature in features:
             if feature in ranked:
                 continue
+            if feature.track_id not in deduped.index:
+                continue
+            signature = _track_signature(deduped.loc[feature.track_id])
+            if signature in seen_signatures:
+                continue
             ranked.append(feature)
+            seen_signatures.add(signature)
             if len(ranked) >= n_recommendations:
                 break
 

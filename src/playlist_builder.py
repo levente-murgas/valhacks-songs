@@ -109,7 +109,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a playlist using the recommender system.")
     parser.add_argument(
         "--seed-track-id",
-        help="Spotify track ID to seed the playlist. If omitted, a random track from the dataset is used.",
+        action="append",
+        dest="seed_track_ids",
+        help="Spotify track ID to seed the playlist. May be supplied multiple times. "
+             "If omitted (and --seed-track-file is not provided), a random track from the dataset is used.",
+    )
+    parser.add_argument(
+        "--seed-track-file",
+        type=Path,
+        help="Optional path to a text file containing seed track IDs (one per line).",
     )
     parser.add_argument(
         "--target-artist",
@@ -169,13 +177,39 @@ def main() -> None:
     args = parse_args()
 
     catalog = load_catalog()
-    seed_track_id = args.seed_track_id or pick_random_track_id(catalog)
-    print(f"Seed track ID: {seed_track_id}")
+
+    seed_ids: list[str] = []
+    if args.seed_track_file:
+        if not args.seed_track_file.exists():
+            raise FileNotFoundError(f"Seed track file not found at {args.seed_track_file}")
+        if args.seed_track_file.suffix.lower() == ".json":
+            file_seeds = json.loads(args.seed_track_file.read_text(encoding="utf-8"))
+            if not isinstance(file_seeds, list):
+                raise ValueError("Seed track JSON file must contain a JSON array of track IDs.")
+            seed_ids.extend(str(track_id) for track_id in file_seeds if track_id)
+        else:
+            seed_ids.extend(
+                [
+                    line.strip()
+                    for line in args.seed_track_file.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            )
+
+    if args.seed_track_ids:
+        seed_ids.extend(args.seed_track_ids)
+
+    seed_ids = [track_id for track_id in seed_ids if track_id]
+
+    if not seed_ids:
+        seed_ids = [pick_random_track_id(catalog)]
+
+    print(f"Seed track IDs: {seed_ids}")
 
     recommender = Recommender()
 
     playlist_ids, explanations = build_playlist(
-        seed_track_ids=[seed_track_id],
+        seed_track_ids=seed_ids,
         target_artist=args.target_artist,
         total_tracks=args.total_tracks,
         step_size=max(1, args.step_size),
@@ -185,7 +219,7 @@ def main() -> None:
     playlist_details = describe_playlist(playlist_ids, catalog)
 
     payload: dict[str, object] = {
-        "seed_track_id": seed_track_id,
+        "seed_track_ids": seed_ids,
         "target_artists": args.target_artist,
         "total_tracks": len(playlist_ids),
         "playlist": playlist_details,
