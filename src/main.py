@@ -1,238 +1,217 @@
-import os
 import json
 import numpy as np
 import pandas as pd
 
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Dict
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
 
+def _safe_path(base: Path, maybe_abs: str) -> Path:
+    p = Path(maybe_abs)
+    if p.is_absolute():
+        return p
+    return base / maybe_abs.lstrip("/")
 
 class Recommender:
     """
-    Content-based baseline using Spotify-style audio features.
-
-    High-level idea:
-      1) Load tracks with numeric audio features.
-      2) Standardize features so each column has mean 0 and stdev 1.
-      3) Apply user-provided weights to each feature (your "pondering" knobs).
-      4) Compute a centroid (average) vector of the seed tracks in this space.
-      5) Rank all tracks by cosine similarity to that centroid.
-      6) Apply tiny multipliers for artist overlap and (optionally) popularity.
-      7) Return the top-N track IDs.
-
-    Why this works:
-      - Standardization makes features comparable.
-      - Weights reflect what you care about more/less (danceability, energy...).
-      - Cosine similarity captures "directional" similarity of the feature vector.
+    Content-based recommender (centroid + cosine) with:
+      - De-duplication by track_id
+      - Exclusion by track_id (not just row index)
+      - Unique outputs guaranteed
+      - Fast vectorized scoring + argpartition
     """
 
-    def __init__(self, dataset_file: str = "/dataset.csv", weights_file: str = "/feature_weights.json"):
-        """
-        Args:
-          dataset_file: path (relative to src/data/) to the CSV with tracks.
-          weights_file: path (relative to src/data/) to a JSON dict of {feature: weight}.
+    BASE_NUMERIC_FEATURES = [
+        "danceability","energy","loudness","speechiness","acousticness",
+        "instrumentalness","liveness","valence","tempo","duration_ms",
+        "popularity","key","mode","time_signature"
+    ]
 
-        Note:
-          We resolve a base folder "src/data/" and then append dataset_file
-          and weights_file. If you pass absolute paths here, you're effectively
-          concatenating strings. Prefer passing relative names like "/dataset.csv"
-          as in this default, or switch to Path-joining for robustness.
-        """
+    def __init__(self, dataset_file: str = "dataset.csv", weights_file: str = "feature_weights.json"):
+        # ---------- Resolve paths ----------
+        data_root = Path("src/data").resolve()
+        dataset_path = _safe_path(data_root, dataset_file)
+        weights_path = _safe_path(data_root, weights_file)
 
-        # Resolve a base folder where data is expected to live: "src/data/"
-        # os.path.dirname("src/data/") -> "src/data"
-        # abspath(...) -> absolute path to that folder based on current working dir.
-        data_path = os.path.abspath(os.path.dirname("src/data/"))
+        # ---------- Load data ----------
+        df = pd.read_csv(dataset_path)
+        # ---- de-duplicate by track_id BEFORE anything else ----
+        if "popularity" in df.columns:
+            # Keep the most popular row for each track_id (stable sort for determinism)
+            df["__pop__"] = pd.to_numeric(df["popularity"], errors="coerce").fillna(-1)
+            df = (df.sort_values("__pop__", ascending=False, kind="mergesort")
+                    .drop_duplicates("track_id", keep="first")
+                    .drop(columns="__pop__")
+                    .reset_index(drop=True))
+        else:
+            df = df.drop_duplicates("track_id", keep="first").reset_index(drop=True)
 
-        # Read the CSV into a DataFrame. We concatenate the base folder + filename.
-        # Example result: "<abs>/src/data/" + "/dataset.csv" -> "<abs>/src/data//dataset.csv"
-        # (double slash is harmless on POSIX)
-        self.df = pd.read_csv(data_path + dataset_file)
+        # Drop rows without a usable id
+        df = df.dropna(subset=["track_id"]).copy()
 
-        # Drop rows without a track_id, because we need IDs to map and to return
-        self.df = self.df.dropna(subset=["track_id"]).copy()
-
-        # Turn the "artists" column (e.g., "A; B; C") into a Python set for fast overlap checks
-        # - Fill missing with empty string
-        # - Split by ';'
-        # - Strip whitespace
-        # - Build a set of non-empty artist names
-        self.df["artists_set"] = self.df["artists"].fillna("").apply(
-            lambda s: set([a.strip() for a in str(s).split(";") if a.strip()])
+        # Parse artists into sets
+        df["artists_set"] = (
+            df["artists"].fillna("")
+            .apply(lambda s: {a.strip() for a in str(s).split(";") if a.strip()})
         )
 
-        # Core numeric audio features used for similarity. Adjust/extend as needed.
-        self.numeric_features = [
-            "danceability", "energy", "loudness", "speechiness", "acousticness",
-            "instrumentalness", "liveness", "valence", "tempo", "duration_ms",
-            "popularity", "key", "mode", "time_signature"
-        ]
+        # Features present in this CSV
+        numeric_features = [c for c in self.BASE_NUMERIC_FEATURES if c in df.columns]
+        if not numeric_features:
+            raise ValueError("No numeric features from BASE_NUMERIC_FEATURES found in dataset.")
 
-        # Ensure every chosen feature is numeric and has no NaNs:
-        # - to_numeric(..., errors="coerce") converts invalid strings to NaN
-        for col in self.numeric_features:
-            if col in self.df.columns:
-                self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
+        # Coerce numerics + median impute
+        for col in numeric_features:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        med = df[numeric_features].median(axis=0, skipna=True)
+        df[numeric_features] = df[numeric_features].fillna(med)
 
-        # -----------------------------
-        # Load user-defined feature weights
-        # -----------------------------
-        # Default every feature to weight 1.0 (neutral).
-        self.weights = {f: 1.0 for f in self.numeric_features}
-
-        # Build a Path to the weights file beside the dataset (same base folder).
-        weights_fp = Path(data_path + weights_file)
-
-        # If a JSON file exists, parse it and override defaults.
-        # Expected format: {"danceability": 1.2, "energy": 0.8, ...}
-        if weights_fp.exists():
+        # ---------- Load weights ----------
+        weights: Dict[str, float] = {f: 1.0 for f in numeric_features}
+        if weights_path.exists():
             try:
-                user_w = json.loads(weights_fp.read_text())
+                user_w = json.loads(weights_path.read_text())
                 for k, v in user_w.items():
-                    if k in self.weights:
-                        # Safely cast to float; ignore unknown keys
-                        self.weights[k] = float(v)
+                    if k in weights:
+                        weights[k] = float(v)
             except Exception:
-                # If parsing fails, silently keep defaults.
-                # (You may want to log a warning in a production system.)
                 pass
 
-        # -----------------------------
-        # Build the feature matrix
-        # -----------------------------
-        # X: shape (num_tracks, num_features), dtype float
-        self.X = self.df[self.numeric_features].to_numpy().astype(float)
+        # ---------- Build standardized, weighted, unit-normalized matrix ----------
+        X = df[numeric_features].to_numpy(dtype=np.float32)
 
-        # Standardize columns to mean=0, stdev=1 so units don't dominate similarity.
-        self.scaler = StandardScaler()
-        Xz = self.scaler.fit_transform(self.X)
+        scaler = StandardScaler(with_mean=True, with_std=True)
+        Xz = scaler.fit_transform(X).astype(np.float32)
 
-        # Create a diagonal matrix W with your per-feature weights on the diagonal
-        # Then compute Xw = Xz @ W to get the weighted standardized features.
-        W = np.diag([self.weights[f] for f in self.numeric_features])
-        self.Xw = Xz @ W
+        wvec = np.array([weights[f] for f in numeric_features], dtype=np.float32)
+        Xw = Xz * wvec  # apply weights
 
-        # Map track_id -> row index for O(1) lookup of seed rows later
+        # Row-normalize to unit length (cosine -> dot product)
+        norms = np.linalg.norm(Xw, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        Xw_unit = (Xw / norms).astype(np.float32)
+
+        # Popularity multipliers (vectorized)
+        if "popularity" in numeric_features:
+            pop = df["popularity"].to_numpy(dtype=np.float32)
+            pop = np.clip(pop, 0.0, 100.0)
+            pop_mult = (0.95 + (pop / 100.0) * 0.15).astype(np.float32)
+        else:
+            pop_mult = np.ones(len(df), dtype=np.float32)
+
+        # Artist inverted index: artist -> np.array(row_idx)
+        artist_to_idx: Dict[str, np.ndarray] = {}
+        for i, aset in enumerate(df["artists_set"].values):
+            for a in aset:
+                artist_to_idx.setdefault(a, []).append(i)
+        for a, idxs in list(artist_to_idx.items()):
+            artist_to_idx[a] = np.fromiter(idxs, dtype=np.int32)
+
+        # Save state
+        self.df = df.reset_index(drop=True)
+        self.numeric_features = numeric_features
+        self.weights = weights
+        self.scaler = scaler
+        self.wvec = wvec
+        self.Xw_unit = Xw_unit
+        self.pop_mult = pop_mult
+        self.artist_to_idx = artist_to_idx
         self.id_to_idx = {tid: i for i, tid in enumerate(self.df["track_id"])}
+        self.track_ids = self.df["track_id"].to_numpy()
 
-    def _artist_boost(self, row_artists: set, target_artist: Set[str]) -> float:
-        """
-        Small multiplicative boost if the candidate's artists overlap with the hint.
-
-        Args:
-          row_artists: set of artists for the candidate row.
-          target_artist: set of one or more artist names provided as a hint.
-
-        Returns:
-          A multiplier (>= 1.0). Default 1.10 if there's ANY overlap; 1.0 otherwise.
-        """
+    @staticmethod
+    def _artist_boost_indices(artist_to_idx: Dict[str, np.ndarray], target_artist: Set[str]) -> np.ndarray:
         if not target_artist:
-            return 1.0
-        return 1.10 if row_artists & target_artist else 1.0
+            return np.empty(0, dtype=np.int32)
+        chunks = [artist_to_idx[a] for a in target_artist if a in artist_to_idx]
+        if not chunks:
+            return np.empty(0, dtype=np.int32)
+        return np.unique(np.concatenate(chunks))
 
-    def _popularity_prior(self, popularity: float) -> float:
-        """
-        Gentle multiplier based on 'popularity' (if available), so more popular
-        tracks get a small nudge but don't dominate.
-
-        Mapping (linear):
-          popularity in [0, 100] -> multiplier in ~[0.95, 1.10]
-
-        Args:
-          popularity: numeric popularity (NaN-safe).
-
-        Returns:
-          A multiplier in [~0.95, ~1.10]. Returns 1.0 if popularity is NaN.
-        """
-        if np.isnan(popularity):
-            return 1.0
-        return 0.95 + (float(popularity) / 100.0) * 0.15
-
-    def get_recommendations(self, input_track_ids: List[str], n_recommendations: int, target_artist: Set[str]) -> List[
-        str]:
-        """
-        Produce N recommended track_ids given one or more seed tracks and an optional artist hint.
-
-        Steps:
-          1) Find row indices for all valid seed track_ids.
-          2) If none found, fall back to the most popular tracks.
-          3) Compute the centroid (mean vector) of the seeds in weighted space.
-          4) Compute cosine similarity of every track to that centroid.
-          5) Exclude seeds themselves (score = -inf).
-          6) Multiply each candidate score by:
-             - artist boost (if an overlap with target_artist),
-             - popularity prior (if the 'popularity' column exists).
-          7) Sort by final score and return the top-N track_ids.
-        """
-
-        # Convert seed IDs to indices (skip any that aren't in the dataset)
+    def get_recommendations(self, input_track_ids: List[str], n_recommendations: int, target_artist: Set[str]) -> List[str]:
+        # Map seeds → indices
         seed_idx = [self.id_to_idx[tid] for tid in input_track_ids if tid in self.id_to_idx]
 
-        # If no seeds are valid/found, return top-N by popularity as a reasonable default
+        # Fallback if no valid seeds
         if not seed_idx:
-            fallback = (
-                self.df.drop_duplicates("track_id")
-                .sort_values("popularity", ascending=False)["track_id"]
-                .head(n_recommendations)
-                .tolist()
-            )
-            return fallback
+            base = self.df
+            if "popularity" in self.df.columns:
+                base = base.sort_values("popularity", ascending=False, kind="mergesort")
+            out = []
+            seen = set(input_track_ids)
+            for tid in base["track_id"]:
+                if tid not in seen:
+                    out.append(tid); seen.add(tid)
+                if len(out) >= n_recommendations:
+                    break
+            return out
 
-        # Compute centroid (average vector) of the seeds in the weighted feature space
-        centroid = self.Xw[seed_idx].mean(axis=0, keepdims=True)
+        # Centroid (mean of seed unit vectors), renormalized to unit
+        centroid = np.mean(self.Xw_unit[seed_idx], axis=0)
+        cn = np.linalg.norm(centroid)
+        centroid_unit = centroid / (cn if cn != 0 else 1.0)
 
-        # Cosine similarity between every track and the centroid -> base relevance
-        sims = cosine_similarity(self.Xw, centroid).ravel()
+        # Cosine = dot product with pre-normalized rows
+        scores = (self.Xw_unit @ centroid_unit).astype(np.float32)
 
-        # Start with similarity as the score
-        scores = sims.copy()
+        # Popularity multiplier (vectorized)
+        scores *= self.pop_mult
 
-        # Whether the dataset has 'popularity' column
-        has_pop = "popularity" in self.df.columns
+        # Artist boost (vectorized)
+        if target_artist:
+            idx = self._artist_boost_indices(self.artist_to_idx, target_artist)
+            if idx.size > 0:
+                scores[idx] *= 1.10
 
-        # Adjust scores:
-        # - Exclude seeds by setting their score to -inf
-        # - Apply artist boost and popularity prior to candidates
-        for i in range(len(scores)):
-            if i in seed_idx:
-                scores[i] = -np.inf  # exclude seeds from being recommended
+        # ---- exclude *all rows* whose track_id is one of the seeds ----
+        seed_mask = self.df["track_id"].isin(input_track_ids).to_numpy()
+        scores[seed_mask] = -np.inf
+
+        # Top-K using argpartition with oversampling to survive uniqueness filtering
+        N = scores.size
+        k = min(max(n_recommendations * 3, n_recommendations), N)
+        part_idx = np.argpartition(-scores, k - 1)[:k]
+        # Stable final order within the slice for determinism
+        local_sorted = part_idx[np.argsort(-scores[part_idx], kind="mergesort")]
+
+        # Collect unique IDs, preserving score order
+        rec_ids: List[str] = []
+        seen: Set[str] = set(input_track_ids)  # also prevents seed IDs sneaking back
+        for j in local_sorted:
+            if not np.isfinite(scores[j]):
                 continue
-
-            # Small multiplier if the artist overlaps the hint set
-            boost = self._artist_boost(self.df.iloc[i]["artists_set"], target_artist)
-
-            # Gentle popularity multiplier if present; otherwise 1.0 (no change)
-            popp = self._popularity_prior(self.df.iloc[i]["popularity"]) if has_pop else 1.0
-
-            # Multiply in-place (keeps cosine similarity as the main signal)
-            scores[i] *= (boost * popp)
-
-        # Rank by descending score (np.argsort sorts ascending; negate for descending)
-        order = np.argsort(-scores)
-
-        # Collect top-N track_ids, skipping seeds and any non-finite scores
-        rec_ids = []
-        for j in order:
-            tid = self.df.iloc[j]["track_id"]
-            if tid not in input_track_ids and np.isfinite(scores[j]):
-                rec_ids.append(tid)
+            tid = self.track_ids[j]
+            if tid in seen:
+                continue
+            rec_ids.append(tid)
+            seen.add(tid)
             if len(rec_ids) >= n_recommendations:
                 break
 
+        # If oversampling wasn't enough (rare), fall back to full sort once
+        if len(rec_ids) < n_recommendations:
+            full_order = np.argsort(-scores, kind="mergesort")
+            for j in full_order:
+                if not np.isfinite(scores[j]):
+                    continue
+                tid = self.track_ids[j]
+                if tid in seen:
+                    continue
+                rec_ids.append(tid)
+                seen.add(tid)
+                if len(rec_ids) >= n_recommendations:
+                    break
+
         return rec_ids
 
-
 if __name__ == "__main__":
-    # Minimal smoke test: build the recommender and query with two seeds & an artist hint
     r = Recommender()
     print("Columns used:", r.numeric_features)
     print(
         r.get_recommendations(
-            ["5SuOikwiRyPMVoIQDJUgSV", "0wihfILRNOwE2156Shezc8", "63bmIgH9sS6sX5Sc7MetGq", "3wpZTp7HM8Dv25oExNgCC6",
-             "3QAE1arPJAMVKt3NUqjikE"],  # seed track_ids
-            10,  # how many to return
-            {"Gen Hoshino", "Mariah Angeliq"}  # optional artist hint
+            ["5SuOikwiRyPMVoIQDJUgSV", "0wihfILRNOwE2156Shezc8",
+             "63bmIgH9sS6sX5Sc7MetGq", "3wpZTp7HM8Dv25oExNgCC6", "3QAE1arPJAMVKt3NUqjikE"],
+            10,
+            {"Gen Hoshino", "Mariah Angeliq"}
         )
     )
