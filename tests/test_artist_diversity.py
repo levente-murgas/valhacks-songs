@@ -36,9 +36,20 @@ class ArtistDiversityTests(unittest.TestCase):
     def setUp(self) -> None:
         data = [
             {"track_id": "seed_a1", "track_name": "Seed A1", "artists": "Artist A", "track_genre": "rock"},
+            {"track_id": "seed_a2", "track_name": "Seed A2", "artists": "Artist A", "track_genre": "rock"},
+            {"track_id": "seed_a3", "track_name": "Seed A3", "artists": "Artist A", "track_genre": "rock"},
+            {"track_id": "seed_b1", "track_name": "Seed B1", "artists": "Artist B", "track_genre": "rock"},
+            {"track_id": "seed_b2", "track_name": "Seed B2", "artists": "Artist B", "track_genre": "rock"},
+            {"track_id": "seed_c1", "track_name": "Seed C1", "artists": "Artist C", "track_genre": "rock"},
             {"track_id": "track_a2", "track_name": "Track A2", "artists": "Artist A", "track_genre": "rock"},
             {"track_id": "track_a3", "track_name": "Track A3", "artists": "Artist A", "track_genre": "rock"},
             {"track_id": "track_b1", "track_name": "Track B1", "artists": "Artist B", "track_genre": "rock"},
+            {
+                "track_id": "track_a_feat_c",
+                "track_name": "Track A Feat C",
+                "artists": "Artist A; Artist C",
+                "track_genre": "rock",
+            },
         ]
         self.dataset = pd.DataFrame(data)
         self.deduped = self.dataset.drop_duplicates(subset="track_id", keep="first").set_index("track_id")
@@ -78,6 +89,39 @@ class ArtistDiversityTests(unittest.TestCase):
         first_track = reordered[0].track_id
         first_artists = ranking._split_artists(self.deduped.loc[first_track]["artists"])
         self.assertFalse(first_artists.intersection(last_artists))
+
+    def test_collaboration_penalty_is_lower_than_single_artist_repeat(self) -> None:
+        playlist_context = ranking._build_playlist_artist_context(
+            ["seed_a1", "seed_a2", "seed_a3", "seed_b1", "seed_c1"],
+            self.deduped,
+        )
+        features = [
+            _make_feature("track_a2", 0.9),
+            _make_feature("track_a_feat_c", 0.89),
+        ]
+
+        ranking._apply_artist_diversity_adjustments(features, self.deduped, playlist_context, target_artist=set())
+
+        penalties = {feature.track_id: feature.artist_diversity_penalty for feature in features}
+        self.assertLess(penalties["track_a_feat_c"], penalties["track_a2"])
+        self.assertLessEqual(penalties["track_a_feat_c"], 0.1)
+
+    def test_target_weighting_makes_target_candidates_dominate(self) -> None:
+        playlist_context = ranking._build_playlist_artist_context(
+            ["seed_b1", "seed_c1", "seed_b2"],
+            self.deduped,
+        )
+        features = [
+            _make_feature("track_b1", 0.84),
+            _make_feature("track_a2", 0.81),
+        ]
+
+        ranking._apply_target_artist_weighting(features, self.deduped, playlist_context, target_artist={"Artist A"})
+        ranking._apply_artist_diversity_adjustments(features, self.deduped, playlist_context, target_artist={"Artist A"})
+
+        adjustments = {feature.track_id: feature.adjusted_score for feature in features}
+        self.assertGreater(adjustments["track_a2"], adjustments["track_b1"])
+        self.assertGreater(features[1].final_score, 0.81)
 
 
 if __name__ == "__main__":

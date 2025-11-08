@@ -102,8 +102,10 @@ Final score = weighted combination:
 - Build a lightweight playlist context (per-artist counts, most recent artists) from the existing seed/profile.
 - Apply an adaptive penalty to the candidate list before selection:
   - Penalise candidates that would repeat the most recent artist when the retrieval slate has sufficient variety.
-  - Down-weight artists already over-represented in the in-progress playlist.
+  - Down-weight artists already over-represented in the in-progress playlist, with automatic relief when a single artist dominates the seed.
+  - Reduce penalties for tracks that introduce new collaborators (e.g. “Artist A; Artist B”) so featured artists flow naturally.
   - Relax automatically when the seed or candidate pool is already dominated by a single artist or the request targets a specific artist.
+- When `target_artist` hints are provided, apply an additional positive boost to those artists so they surface — and repeat — more aggressively until they occupy the majority share of the playlist.
 - Sort by the adjusted score (final score minus diversity penalty) to choose the shortlist.
 - Run a final greedy reordering pass to avoid back-to-back duplicates when alternatives exist.
 - If diversity-aware filtering still leaves gaps, backfill with the highest-scoring remaining candidates (duplicates allowed as a last resort).
@@ -113,7 +115,7 @@ Final score = weighted combination:
 - `recommend_tracks` – main entry, given track IDs and optional target artist set.
 - `recommend_tracks_with_resources` – same but allows passing preloaded dataset/index (used by `Recommender`).
 - `generate_and_store_index` – convenience wrapper to build and save the ANN index.
-- Recommendation detail payloads now expose both `artist_diversity_penalty` and `adjusted_score` so clients can inspect how diversity logic affected each suggestion.
+- Recommendation detail payloads now expose both `artist_diversity_penalty` and `adjusted_score` so clients can inspect how diversity weighting shaped the final ordering.
 
 ## 5. Recommender Class
 
@@ -195,4 +197,24 @@ python src/playlist_builder.py \
 5. **Generate playlists** interactively via `playlist_builder.py`.
 
 This modular design keeps the heavy preprocessing (scaling, ANN index) off the request path, while the heuristic ranker provides explainable scoring and quick iteration for tuning weights.
+
+## 9. Streamlit GUI
+
+For a quick, no-React interface to explore playlists and their characteristics, use the Streamlit app added under `app/gui.py`.
+
+- **Install dependencies** (ensure `streamlit` is available):  
+  ```bash
+  pip install -r requirements.txt
+  ```
+- **Run the app** from the project root:  
+  ```bash
+  streamlit run app/gui.py
+  ```
+- **Features**:
+  - Generate new playlists by pasting Spotify track IDs as seeds and (optionally) highlighting target artists.
+  - Load bundled sample playlists from the `data/` directory.
+  - Inspect summary metrics, artist diversity charts, audio-feature averages, and the scoring breakdown produced by the heuristic ranker.
+  - Push the active playlist to Spotify with the **Add to Spotify** button (includes optional advanced auth controls and reuses the existing export helper).
+
+The Streamlit application reuses the existing recommender pipeline (`playlist_builder` + `Recommender`) without modifying any ranking logic, so UI experimentation stays decoupled from scoring updates.
 

@@ -102,6 +102,12 @@ def push_playlist_to_spotify(
     Raises:
         SpotifyExportError: If authentication fails or playlist creation/addition fails.
     """
+    logger.info(
+        "Preparing Spotify export: %d track(s), playlist_name='%s', public=%s",
+        len(track_ids),
+        playlist_name,
+        public,
+    )
     normalized_ids: list[str] = []
     for track_id in track_ids:
         try:
@@ -110,6 +116,7 @@ def push_playlist_to_spotify(
             logger.warning("Skipping invalid track ID '%s': %s", track_id, exc)
 
     if not normalized_ids:
+        logger.error("Aborting Spotify export: no valid track IDs provided.")
         raise SpotifyExportError("No valid Spotify track IDs were provided.")
 
     scope_str = " ".join(scopes or DEFAULT_SCOPES)
@@ -125,7 +132,9 @@ def push_playlist_to_spotify(
         client: Spotify = spotipy.Spotify(auth_manager=auth_manager)
         current_user = client.current_user()
         user_id = current_user["id"]
+        logger.info("Authenticated with Spotify as user '%s'", user_id)
     except Exception as exc:  # noqa: BLE001 - surface as SpotifyExportError
+        logger.exception("Failed to authenticate with Spotify.")
         raise SpotifyExportError(f"Failed to authenticate with Spotify: {exc}") from exc
 
     try:
@@ -137,6 +146,7 @@ def push_playlist_to_spotify(
         )
         playlist_id = created_playlist["id"]
         snapshot_id = created_playlist.get("snapshot_id", "")
+        logger.info("Created Spotify playlist '%s' (%s)", playlist_name, playlist_id)
 
         for batch in _chunked(normalized_ids, 100):
             response = client.playlist_add_items(playlist_id, list(batch))
@@ -145,7 +155,13 @@ def push_playlist_to_spotify(
         playlist_url = created_playlist.get("external_urls", {}).get(
             "spotify", f"https://open.spotify.com/playlist/{playlist_id}"
         )
+        logger.info(
+            "Successfully added %d track(s) to Spotify playlist '%s'.",
+            len(normalized_ids),
+            playlist_id,
+        )
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to create or populate Spotify playlist.")
         raise SpotifyExportError(f"Failed to create or populate playlist: {exc}") from exc
 
     return {

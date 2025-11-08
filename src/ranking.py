@@ -209,12 +209,20 @@ def _build_playlist_artist_context(
             counts[artist] = counts.get(artist, 0) + 1
         recent_artists.append(artists)
 
+    total_tracks = len(track_ids)
+    if counts:
+        dominant_count = max(counts.values())
+    else:
+        dominant_count = 0
+    dominant_share = float(dominant_count) / float(total_tracks) if total_tracks else 0.0
+
     context = {
         "counts": counts,
         "recent": recent_artists[-3:],
         "last_artists": recent_artists[-1] if recent_artists else set(),
-        "total_tracks": len(track_ids),
+        "total_tracks": total_tracks,
         "unique_artists": len(counts),
+        "dominant_share": dominant_share,
     }
     return context
 
@@ -242,6 +250,7 @@ def _compute_penalty_scale(
 
     unique_artists = int(playlist_context.get("unique_artists", 0))
     total_tracks = int(playlist_context.get("total_tracks", 0))
+    dominant_share = float(playlist_context.get("dominant_share", 0.0))
 
     if total_tracks <= 1:
         base_scale = 1.0
@@ -251,6 +260,14 @@ def _compute_penalty_scale(
         base_scale = 0.6
     else:
         base_scale = 0.4
+
+    if total_tracks >= 3:
+        if dominant_share >= 0.6:
+            base_scale *= 0.3
+        elif dominant_share >= 0.45:
+            base_scale *= 0.55
+        elif dominant_share >= 0.35:
+            base_scale *= 0.75
 
     if candidate_pool_size == 2:
         base_scale *= 0.4
@@ -276,6 +293,7 @@ def _apply_artist_diversity_adjustments(
     if not isinstance(artist_counts, dict):
         artist_counts = {}
     total_tracks = int(playlist_context.get("total_tracks", 0))
+    dominant_share = float(playlist_context.get("dominant_share", 0.0))
 
     for feature in features:
         if feature.track_id not in deduped.index:
@@ -289,17 +307,87 @@ def _apply_artist_diversity_adjustments(
 
         penalty = 0.0
         if penalty_scale > 0.0 and not is_target_artist:
-            if artists and last_artists and last_artists.intersection(artists):
-                penalty += 0.25 * penalty_scale
+            artist_count = len(artists)
+            if artists and last_artists:
+                overlap = last_artists.intersection(artists)
+                if overlap:
+                    overlap_fraction = len(overlap) / float(max(len(artists), 1))
+                    penalty += 0.25 * penalty_scale * overlap_fraction
 
             if artists and total_tracks > 0:
-                max_existing = max(artist_counts.get(artist, 0) for artist in artists)
-                if max_existing > 0:
-                    ratio = max_existing / float(total_tracks)
-                    penalty += penalty_scale * 0.15 * (0.5 + ratio)
+                existing_shares = [
+                    artist_counts.get(artist, 0) / float(total_tracks)
+                    for artist in artists
+                    if artist_counts.get(artist, 0) > 0
+                ]
+                if existing_shares:
+                    avg_share = sum(existing_shares) / len(existing_shares)
+                    relief_baseline = max(0.2, dominant_share - 0.1)
+                    ratio_over = max(0.0, avg_share - relief_baseline)
+                    if ratio_over > 0.0:
+                        share_penalty = penalty_scale * (0.04 + 0.22 * ratio_over)
+                    else:
+                        share_penalty = penalty_scale * (0.02 if artist_count == 1 else 0.0)
+                    penalty += share_penalty
+                elif artist_count == 1:
+                    penalty += penalty_scale * 0.02
+
+            if penalty > 0.0:
+                if artist_count == 1:
+                    relief_factor = 1.0
+                elif artist_count == 2:
+                    relief_factor = 0.45
+                else:
+                    relief_factor = 0.35
+                penalty *= relief_factor
 
         feature.artist_diversity_penalty = penalty
         feature.adjusted_score = feature.final_score - penalty
+
+
+def _apply_target_artist_weighting(
+    features: Sequence[CandidateFeatures],
+    deduped: pd.DataFrame,
+    playlist_context: dict[str, object],
+    target_artist: set[str],
+) -> None:
+    if not target_artist:
+        return
+
+    counts = playlist_context.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    total_tracks = int(playlist_context.get("total_tracks", 0))
+
+    target_counts = sum(counts.get(artist, 0) for artist in target_artist)
+    target_share = target_counts / float(total_tracks) if total_tracks else 0.0
+
+    desired_share = 0.65 if len(target_artist) == 1 else 0.55
+    deficit = max(0.0, desired_share - target_share)
+    base_bonus = 0.18 if len(target_artist) == 1 else 0.14
+    max_bonus = 0.42 if len(target_artist) == 1 else 0.34
+
+    for feature in features:
+        if feature.track_id not in deduped.index:
+            continue
+        row = deduped.loc[feature.track_id]
+        artists = _split_artists(row["artists"])
+        if not artists:
+            continue
+
+        overlap = target_artist.intersection(artists)
+        if not overlap:
+            continue
+
+        collaborator_factor = len(overlap) / float(len(artists))
+        collaborator_factor = max(0.5, collaborator_factor)
+
+        bonus = base_bonus + 0.5 * deficit
+        bonus = min(max_bonus, bonus)
+        bonus *= collaborator_factor
+
+        feature.final_score += bonus
+        feature.adjusted_score = feature.final_score
 
 
 def _avoid_adjacent_artist_repeats(
@@ -384,6 +472,7 @@ def rank_candidates(
     )
     features = compute_candidate_features(candidate_ids, seed, dataset, target_artist)
 
+    _apply_target_artist_weighting(features, deduped, playlist_context, target_artist)
     features.sort(key=lambda item: item.final_score, reverse=True)
     _apply_artist_diversity_adjustments(features, deduped, playlist_context, target_artist)
     features.sort(key=lambda item: item.adjusted_score, reverse=True)
