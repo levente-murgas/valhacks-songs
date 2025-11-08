@@ -46,11 +46,8 @@ requirements: requirements.txt ## Install Requirements
 pip: ## Run pip commands
 	@${VENV_PIP} $(ARGS)
 
-run: ## Run main.py
-	@${VENV_PYTHON} ${SOURCE_PATH}/main.py
-
-evaluator: ## Run evaluator.py
-	@${VENV_PYTHON} ${SOURCE_PATH}/evaluator.py
+weight_based: ## Run main.py
+	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_weight_based.py
 
 
 .PHONY: venv requirements pip run
