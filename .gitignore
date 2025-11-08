@@ -33,6 +33,8 @@ data/*.txt
 # Logs / cache
 *.log
 *.cache/
+.cache
+.cache-*
 
 # Other generated files
 dist/

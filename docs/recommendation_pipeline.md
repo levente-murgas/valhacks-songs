@@ -79,6 +79,7 @@ For each candidate track:
 - **Explicit and mode alignment**: penalties when seed preference conflicts with candidate (e.g. explicit mismatch, major/minor mismatch).
 - **Novelty bonus**: scaled by z-score of popularity to slightly prefer less mainstream tracks while avoiding extreme negatives.
 - **Variance penalty**: dampens candidates that differ dramatically in tempo, energy, or valence beyond seed tolerances.
+- **Artist diversity penalty**: computed later using playlist context but stored alongside each candidate to make the final ordering transparent.
 
 ### 4.2 Score aggregation
 
@@ -98,14 +99,21 @@ Final score = weighted combination:
 
 ### 4.3 Diversity rules
 
-- After sorting by final score, enforce artist diversity (max one track per artist) unless the candidate belongs to the target-artist hint set.
-- If diversity filter depletes too many tracks, fall back to the original ranking to fill remaining slots.
+- Build a lightweight playlist context (per-artist counts, most recent artists) from the existing seed/profile.
+- Apply an adaptive penalty to the candidate list before selection:
+  - Penalise candidates that would repeat the most recent artist when the retrieval slate has sufficient variety.
+  - Down-weight artists already over-represented in the in-progress playlist.
+  - Relax automatically when the seed or candidate pool is already dominated by a single artist or the request targets a specific artist.
+- Sort by the adjusted score (final score minus diversity penalty) to choose the shortlist.
+- Run a final greedy reordering pass to avoid back-to-back duplicates when alternatives exist.
+- If diversity-aware filtering still leaves gaps, backfill with the highest-scoring remaining candidates (duplicates allowed as a last resort).
 
 ### 4.4 Public API
 
 - `recommend_tracks` – main entry, given track IDs and optional target artist set.
 - `recommend_tracks_with_resources` – same but allows passing preloaded dataset/index (used by `Recommender`).
 - `generate_and_store_index` – convenience wrapper to build and save the ANN index.
+- Recommendation detail payloads now expose both `artist_diversity_penalty` and `adjusted_score` so clients can inspect how diversity logic affected each suggestion.
 
 ## 5. Recommender Class
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Iterable, Sequence
@@ -15,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from data.recommender import Recommender
+from spotify_export import SpotifyExportError, push_playlist_to_spotify
 
 DATASET_PATH = PROJECT_ROOT / "data" / "dataset.csv"
 
@@ -152,6 +154,46 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional path to write a plain-text list of 'Artist - Title' lines.",
     )
+    parser.add_argument(
+        "--push-to-spotify",
+        action="store_true",
+        help="Create the generated playlist in the authenticated Spotify account.",
+    )
+    parser.add_argument(
+        "--spotify-playlist-name",
+        type=str,
+        help="Optional name for the Spotify playlist. Defaults to a timestamped name.",
+    )
+    parser.add_argument(
+        "--spotify-description",
+        type=str,
+        help="Optional description to set on the Spotify playlist.",
+    )
+    parser.add_argument(
+        "--spotify-public",
+        action="store_true",
+        help="Create the Spotify playlist as public. Defaults to private.",
+    )
+    parser.add_argument(
+        "--spotify-client-id",
+        type=str,
+        help="Optional Spotify client ID. Falls back to SPOTIPY_CLIENT_ID if omitted.",
+    )
+    parser.add_argument(
+        "--spotify-client-secret",
+        type=str,
+        help="Optional Spotify client secret. Falls back to SPOTIPY_CLIENT_SECRET if omitted.",
+    )
+    parser.add_argument(
+        "--spotify-redirect-uri",
+        type=str,
+        help="Optional Spotify redirect URI. Falls back to SPOTIPY_REDIRECT_URI if omitted.",
+    )
+    parser.add_argument(
+        "--spotify-cache-path",
+        type=Path,
+        help="Optional path for caching Spotify OAuth tokens.",
+    )
     return parser.parse_args()
 
 
@@ -218,6 +260,29 @@ def main() -> None:
 
     playlist_details = describe_playlist(playlist_ids, catalog)
 
+    spotify_result: dict[str, object] | None = None
+    if args.push_to_spotify:
+        default_name = datetime.now().strftime("ValHacks Playlist %Y-%m-%d %H:%M:%S")
+        playlist_name = args.spotify_playlist_name or default_name
+        try:
+            export_result = push_playlist_to_spotify(
+                track_ids=playlist_ids,
+                playlist_name=playlist_name,
+                description=args.spotify_description,
+                public=args.spotify_public,
+                client_id=args.spotify_client_id,
+                client_secret=args.spotify_client_secret,
+                redirect_uri=args.spotify_redirect_uri,
+                cache_path=str(args.spotify_cache_path) if args.spotify_cache_path else None,
+            )
+        except SpotifyExportError as exc:
+            spotify_result = {"status": "error", "message": str(exc)}
+            print(f"\n[Spotify] Failed to export playlist: {exc}", file=sys.stderr)
+        else:
+            export_result["name"] = playlist_name
+            spotify_result = {"status": "success", **export_result}
+            print(f"\nSpotify playlist created: {export_result['playlist_url']}")
+
     payload: dict[str, object] = {
         "seed_track_ids": seed_ids,
         "target_artists": args.target_artist,
@@ -225,6 +290,8 @@ def main() -> None:
         "playlist": playlist_details,
         "explanations": explanations,
     }
+    if spotify_result is not None:
+        payload["spotify_export"] = spotify_result
     if args.json:
         print(json.dumps(sanitize(payload), indent=2))
     elif args.output:

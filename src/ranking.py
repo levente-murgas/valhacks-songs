@@ -46,6 +46,8 @@ class CandidateFeatures:
     novelty_bonus: float
     variance_penalty: float
     final_score: float
+    artist_diversity_penalty: float
+    adjusted_score: float
 
     def to_dict(self) -> dict[str, float | str]:
         return {
@@ -60,6 +62,8 @@ class CandidateFeatures:
             "novelty_bonus": self.novelty_bonus,
             "variance_penalty": self.variance_penalty,
             "final_score": self.final_score,
+            "artist_diversity_penalty": self.artist_diversity_penalty,
+            "adjusted_score": self.adjusted_score,
         }
 
 
@@ -180,10 +184,156 @@ def compute_candidate_features(
             novelty_bonus=novelty_bonus,
             variance_penalty=variance_penalty,
             final_score=final_score,
+            artist_diversity_penalty=0.0,
+            adjusted_score=final_score,
         )
         results.append(features)
 
     return results
+
+
+def _build_playlist_artist_context(
+    track_ids: Sequence[str],
+    deduped: pd.DataFrame,
+) -> dict[str, object]:
+    counts: dict[str, int] = {}
+    recent_artists: list[set[str]] = []
+
+    for track_id in track_ids:
+        if track_id not in deduped.index:
+            continue
+        artists = _split_artists(deduped.loc[track_id]["artists"])
+        if not artists:
+            continue
+        for artist in artists:
+            counts[artist] = counts.get(artist, 0) + 1
+        recent_artists.append(artists)
+
+    context = {
+        "counts": counts,
+        "recent": recent_artists[-3:],
+        "last_artists": recent_artists[-1] if recent_artists else set(),
+        "total_tracks": len(track_ids),
+        "unique_artists": len(counts),
+    }
+    return context
+
+
+def _collect_candidate_artist_pool(
+    features: Sequence[CandidateFeatures],
+    deduped: pd.DataFrame,
+    sample_size: int = 20,
+) -> set[str]:
+    pool: set[str] = set()
+    for feature in features[:sample_size]:
+        if feature.track_id not in deduped.index:
+            continue
+        artists = _split_artists(deduped.loc[feature.track_id]["artists"])
+        pool.update(artists)
+    return pool
+
+
+def _compute_penalty_scale(
+    playlist_context: dict[str, object],
+    candidate_pool_size: int,
+) -> float:
+    if candidate_pool_size <= 1:
+        return 0.0
+
+    unique_artists = int(playlist_context.get("unique_artists", 0))
+    total_tracks = int(playlist_context.get("total_tracks", 0))
+
+    if total_tracks <= 1:
+        base_scale = 1.0
+    elif unique_artists >= 3:
+        base_scale = 1.0
+    elif unique_artists == 2:
+        base_scale = 0.6
+    else:
+        base_scale = 0.4
+
+    if candidate_pool_size == 2:
+        base_scale *= 0.4
+    elif candidate_pool_size == 3:
+        base_scale *= 0.7
+
+    return max(0.0, min(1.0, base_scale))
+
+
+def _apply_artist_diversity_adjustments(
+    features: Sequence[CandidateFeatures],
+    deduped: pd.DataFrame,
+    playlist_context: dict[str, object],
+    target_artist: set[str],
+) -> None:
+    candidate_pool = _collect_candidate_artist_pool(features, deduped, sample_size=max(10, len(features)))
+    penalty_scale = _compute_penalty_scale(playlist_context, len(candidate_pool))
+
+    last_artists = playlist_context.get("last_artists")
+    if not isinstance(last_artists, set):
+        last_artists = set()
+    artist_counts = playlist_context.get("counts")
+    if not isinstance(artist_counts, dict):
+        artist_counts = {}
+    total_tracks = int(playlist_context.get("total_tracks", 0))
+
+    for feature in features:
+        if feature.track_id not in deduped.index:
+            feature.artist_diversity_penalty = 0.0
+            feature.adjusted_score = feature.final_score
+            continue
+
+        row = deduped.loc[feature.track_id]
+        artists = _split_artists(row["artists"])
+        is_target_artist = bool(target_artist.intersection(artists))
+
+        penalty = 0.0
+        if penalty_scale > 0.0 and not is_target_artist:
+            if artists and last_artists and last_artists.intersection(artists):
+                penalty += 0.25 * penalty_scale
+
+            if artists and total_tracks > 0:
+                max_existing = max(artist_counts.get(artist, 0) for artist in artists)
+                if max_existing > 0:
+                    ratio = max_existing / float(total_tracks)
+                    penalty += penalty_scale * 0.15 * (0.5 + ratio)
+
+        feature.artist_diversity_penalty = penalty
+        feature.adjusted_score = feature.final_score - penalty
+
+
+def _avoid_adjacent_artist_repeats(
+    features: Sequence[CandidateFeatures],
+    deduped: pd.DataFrame,
+    last_artists: set[str],
+) -> list[CandidateFeatures]:
+    if not features:
+        return list(features)
+
+    ordered: list[CandidateFeatures] = []
+    remaining = list(features)
+    previous_artists = set(last_artists)
+
+    while remaining:
+        pick_index = None
+        for idx, feature in enumerate(remaining):
+            if feature.track_id not in deduped.index:
+                pick_index = idx
+                break
+            artists = _split_artists(deduped.loc[feature.track_id]["artists"])
+            if not previous_artists or not artists.intersection(previous_artists):
+                pick_index = idx
+                break
+        if pick_index is None:
+            pick_index = 0
+        feature = remaining.pop(pick_index)
+        ordered.append(feature)
+        if feature.track_id in deduped.index:
+            previous_artists = _split_artists(deduped.loc[feature.track_id]["artists"])
+        else:
+            previous_artists = set()
+
+    return ordered
 
 
 def _split_artists(artists_str: str) -> set[str]:
@@ -225,6 +375,7 @@ def rank_candidates(
     exclude_track_ids: Iterable[str] | None = None,
 ) -> list[CandidateFeatures]:
     deduped = dataset.drop_duplicates(subset="track_id", keep="first").set_index("track_id")
+    playlist_context = _build_playlist_artist_context(seed.present_track_ids, deduped)
     candidate_ids = generate_candidate_track_ids(
         seed=seed,
         index=candidate_index,
@@ -234,6 +385,8 @@ def rank_candidates(
     features = compute_candidate_features(candidate_ids, seed, dataset, target_artist)
 
     features.sort(key=lambda item: item.final_score, reverse=True)
+    _apply_artist_diversity_adjustments(features, deduped, playlist_context, target_artist)
+    features.sort(key=lambda item: item.adjusted_score, reverse=True)
 
     ranked: list[CandidateFeatures] = []
     artist_counts: dict[str, int] = {}
@@ -284,6 +437,11 @@ def rank_candidates(
             seen_signatures.add(signature)
             if len(ranked) >= n_recommendations:
                 break
+
+    last_artists = playlist_context.get("last_artists")
+    if not isinstance(last_artists, set):
+        last_artists = set()
+    ranked = _avoid_adjacent_artist_repeats(ranked, deduped, last_artists)
 
     return ranked[:n_recommendations]
 
