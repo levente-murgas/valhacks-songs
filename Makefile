@@ -46,10 +46,13 @@ requirements: requirements.txt ## Install Requirements
 pip: ## Run pip commands
 	@${VENV_PIP} $(ARGS)
 
-weight_based: ## Run main.py
+knn: ## knn
+	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_knn.py
+
+weight_based: ## Run weight based
 	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_weight_based.py
 
-trained: ## Run main.py
+trained: ## Run trained
 	@${VENV_PYTHON} ${SOURCE_PATH}/recommender_trained.py
 
 .PHONY: venv requirements pip run

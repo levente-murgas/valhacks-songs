@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Set
+
+import numpy as np
+import pandas as pd
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import StandardScaler
+
+
+def _safe_path(base: Path, maybe_abs: str) -> Path:
+    candidate = Path(maybe_abs)
+    return candidate if candidate.is_absolute() else base / maybe_abs.lstrip("/")
+
+
+class Recommender:
+    """
+    KNN-based recommender that learns song similarity directly from audio features:
+      * builds a cosine-nearest-neighbors index on standardized feature vectors
+      * creates a listener profile from the most recent seed tracks
+      * boosts tracks that match requested artists and popularity
+      * falls back to globally popular titles when no seeds match
+    Only the CSV dataset is consumed; no auxiliary metadata sources are required.
+    """
+
+    BASE_NUMERIC_FEATURES: Sequence[str] = (
+        "danceability",
+        "energy",
+        "loudness",
+        "speechiness",
+        "acousticness",
+        "instrumentalness",
+        "liveness",
+        "valence",
+        "tempo",
+        "duration_ms",
+        "popularity",
+        "key",
+        "mode",
+        "time_signature",
+    )
+
+    RECENCY_WINDOW = 40
+    RECENCY_DECAY = 0.82
+    CANDIDATE_MULTIPLIER = 12
+    MIN_CANDIDATES = 128
+    POP_WEIGHT = 0.15
+    ARTIST_BONUS = 0.12
+
+    def __init__(self, dataset_file: str = "dataset.csv") -> None:
+        data_root = Path("src/data").resolve()
+        dataset_path = _safe_path(data_root, dataset_file)
+        if not dataset_path.exists():
+            raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+        df = pd.read_csv(dataset_path)
+        if "Unnamed: 0" in df.columns:
+            df = df.drop(columns=["Unnamed: 0"])
+        df = (
+            df.dropna(subset=["track_id"])
+            .drop_duplicates("track_id", keep="first")
+            .reset_index(drop=True)
+        )
+
+        df["artists_set"] = (
+            df["artists"]
+            .fillna("")
+            .apply(lambda s: {a.strip() for a in str(s).split(";") if a.strip()})
+        )
+
+        numeric_features = [c for c in self.BASE_NUMERIC_FEATURES if c in df.columns]
+        if not numeric_features:
+            raise ValueError("No supported numeric features found in dataset.")
+
+        feature_frame = df[numeric_features].copy()
+        for col in numeric_features:
+            feature_frame[col] = pd.to_numeric(feature_frame[col], errors="coerce")
+        medians = feature_frame.median(axis=0, skipna=True)
+        feature_frame = feature_frame.fillna(medians)
+
+        scaler = StandardScaler()
+        feature_matrix = scaler.fit_transform(feature_frame.to_numpy(dtype=np.float32)).astype(
+            np.float32
+        )
+
+        nn_model = NearestNeighbors(metric="cosine", algorithm="brute")
+        nn_model.fit(feature_matrix)
+
+        self.df = df.reset_index(drop=True)
+        self.features = feature_matrix
+        self.scaler = scaler
+        self.numeric_features = numeric_features
+        self.nn_model = nn_model
+        self.track_ids = self.df["track_id"].to_numpy(dtype=object)
+        self.id_to_idx: Dict[str, int] = {tid: i for i, tid in enumerate(self.track_ids)}
+        self.artist_sets: List[Set[str]] = self.df["artists_set"].tolist()
+        self.artist_sets_lower: List[Set[str]] = [{a.lower() for a in aset} for aset in self.artist_sets]
+
+        if "popularity" in self.df.columns:
+            pop = (
+                pd.to_numeric(self.df["popularity"], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(dtype=np.float32)
+            )
+        else:
+            pop = np.zeros(len(self.df), dtype=np.float32)
+        pop = np.clip(pop, 0.0, 100.0)
+        self.popularity = (pop + 1.0) / 101.0
+        self.popularity_sorted_idx = np.argsort(-self.popularity, kind="mergesort")
+
+        self._recency_cache: Dict[int, np.ndarray] = {}
+
+    def _recency_weights(self, length: int) -> np.ndarray:
+        if length <= 0:
+            return np.empty(0, dtype=np.float32)
+        cached = self._recency_cache.get(length)
+        if cached is not None:
+            return cached
+        order = np.arange(length, dtype=np.float32)
+        # newest samples receive highest weights via exponential decay
+        weights = np.power(self.RECENCY_DECAY, length - 1 - order).astype(np.float32)
+        total = weights.sum()
+        weights = weights / total if total else np.full(length, 1.0 / length, dtype=np.float32)
+        self._recency_cache[length] = weights
+        return weights
+
+    def _popularity_fallback(
+        self, seen: Set[str], needed: int, target_artists: Optional[Iterable[str]]
+    ) -> List[str]:
+        out: List[str] = []
+        if needed <= 0:
+            return out
+        normalized_targets = {a.lower() for a in (target_artists or set()) if a}
+        # try to honor artist hints before generic popularity
+        if normalized_targets:
+            prioritized = [
+                idx
+                for idx, artists in enumerate(self.artist_sets_lower)
+                if artists & normalized_targets
+            ]
+            for idx in prioritized:
+                tid = self.track_ids[idx]
+                if tid in seen:
+                    continue
+                out.append(tid)
+                seen.add(tid)
+                if len(out) >= needed:
+                    return out
+        for idx in self.popularity_sorted_idx:
+            tid = self.track_ids[idx]
+            if tid in seen:
+                continue
+            out.append(tid)
+            seen.add(tid)
+            if len(out) >= needed:
+                break
+        return out
+
+    def _user_profile(self, idxs: Sequence[int]) -> np.ndarray:
+        recent = idxs[-self.RECENCY_WINDOW :]
+        weights = self._recency_weights(len(recent))
+        profile = np.average(self.features[recent], axis=0, weights=weights).astype(np.float32)
+        norm = np.linalg.norm(profile)
+        return profile / (norm if norm else 1.0)
+
+    def get_recommendations(
+        self,
+        input_track_ids: Sequence[str],
+        n_recommendations: int,
+        target_artist: Optional[Set[str]] = None,
+    ) -> List[str]:
+        if n_recommendations <= 0:
+            return []
+        normalized_target = {a.lower() for a in (target_artist or set()) if a}
+
+        valid_indices = [self.id_to_idx[tid] for tid in input_track_ids if tid in self.id_to_idx]
+        seen: Set[str] = set(input_track_ids)
+
+        if not valid_indices:
+            return self._popularity_fallback(seen, n_recommendations, normalized_target)
+
+        profile = self._user_profile(valid_indices)
+        candidate_pool = min(
+            len(self.df),
+            max(self.MIN_CANDIDATES, n_recommendations * self.CANDIDATE_MULTIPLIER),
+        )
+        distances, neighbor_idxs = self.nn_model.kneighbors(profile.reshape(1, -1), candidate_pool)
+        distances = distances[0]
+        neighbor_idxs = neighbor_idxs[0]
+
+        candidate_scores: Dict[str, float] = {}
+        for rank, (idx, dist) in enumerate(zip(neighbor_idxs, distances)):
+            tid = self.track_ids[idx]
+            if tid in seen:
+                continue
+            similarity = 1.0 - dist  # cosine distance -> similarity
+            score = similarity + self.popularity[idx] * self.POP_WEIGHT
+            if normalized_target and (self.artist_sets_lower[idx] & normalized_target):
+                score += self.ARTIST_BONUS
+            # small rank-based tie-breaker keeps closer neighbors first
+            score -= rank * 1e-4
+            # keep the best score if duplicate candidate surfaces
+            prev = candidate_scores.get(tid)
+            if prev is None or score > prev:
+                candidate_scores[tid] = score
+
+        ordered = sorted(candidate_scores.items(), key=lambda kv: kv[1], reverse=True)
+        recommendations = [tid for tid, _ in ordered[:n_recommendations]]
+
+        if len(recommendations) < n_recommendations:
+            missing = n_recommendations - len(recommendations)
+            recommendations.extend(
+                self._popularity_fallback(seen | set(recommendations), missing, normalized_target)
+            )
+
+        return recommendations
+
+
+if __name__ == "__main__":
+    r = Recommender()
+    print(
+        r.get_recommendations(
+            [
+                "7o2CTH4ctstm8TNelqjb51",
+                "2zYzyRzz6pRmhPzyfMEC8s",
+                "08mG3Y1vljYA6bvDt4Wqkj",
+                "0bVtevEgtDIeRjCJbK3Lmv",
+                "3YBZIN3rekqsKxbJc9FZko",
+                "57bgtoPSgt236HzfBOd8kj",
+                "7LRMbd3LEoV5wZJvXT1Lwb",
+                "2SiXAy7TuUkycRVbbWDEpo",
+                "0C80GCp0mMuBzLf3EAXqxv"
+            ],
+            2,
+            {"AC/DC", "Europe", "Guns N' Roses"}
+        )
+    )
